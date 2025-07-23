@@ -9,6 +9,7 @@ import os
 
 # set up env file and set up parsing arguments
 load_dotenv()
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="Superman")
 args = parser.parse_args()
