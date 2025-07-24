@@ -1,26 +1,55 @@
-from langchain.prompts import HumanMessagePromptTemplate, ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-# from langchain.chains import LLMChain (don't need this import if we use | to create chains)
+from langchain.prompts import MessagesPlaceholder, HumanMessagePromptTemplate, ChatPromptTemplate
+from langchain_community.chat_message_histories import FileChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
 from dotenv import load_dotenv
+
 load_dotenv()
 
-# need to get conversational model
+# Initialize the chat model
 chat = ChatOpenAI()
 
-# LangChain template to create prompt for chat based model
+# Create a prompt template
 prompt = ChatPromptTemplate(
-    # expects one input var
-    input_variables = ['content'],
-    # creates a system message that represents what human would say
-    messages = [HumanMessagePromptTemplate.from_template("{content}")]
+    input_variables=["content"],  # Only content as input, history is handled separately
+    messages=[
+        MessagesPlaceholder(variable_name="history"),  # Placeholder for conversation history
+        HumanMessagePromptTemplate.from_template("{content}")
+    ]
 )
 
-# check notes
+# Build the base chain (without memory)
 chain = prompt | chat
 
+# Create a single chat history instance
+chat_history = FileChatMessageHistory("messages.json")
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    """Return the chat history (ignoring session_id for simplicity)."""
+    return chat_history
+
+# Wrap the chain with message history handling
+chain_with_history = RunnableWithMessageHistory(
+    chain,
+    get_session_history,
+    input_messages_key="content",
+    history_messages_key="history",
+)
+
+# Main conversation loop
 while True:
     content = input(">> ")
-    # use new .invoke method to execute chains
-    result = chain.invoke({"content": content})
-    # result object has content attribute, not ["text"]
+    
+    # Exit condition
+    if content.lower() in ['exit', 'quit']:
+        print("Goodbye!")
+        break
+    
+    # Run the chain with automatic history management
+    result = chain_with_history.invoke(
+        {"content": content},
+        config={"configurable": {"session_id": "default"}}  # Required by RunnableWithMessageHistory API
+    )
+    
     print(result.content)

@@ -38,3 +38,6 @@
     # input goes to prompt first --> prompt formats input with template --> formatted prompt goes to chat mode --> chat model generates response
 
 
+# Memory
+### stores conversation history so AI can remember what was sent earlier
+### memory_key holds conversation history when passed to prompt
