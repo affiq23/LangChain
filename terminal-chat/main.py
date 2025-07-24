@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 load_dotenv()
 
+# need to get conversational model
 chat = ChatOpenAI()
 
 # LangChain template to create prompt for chat based model
@@ -14,12 +15,7 @@ prompt = ChatPromptTemplate(
     messages = [HumanMessagePromptTemplate.from_template("{content}")]
 )
 
-# Old way (not needed anymore)
-# chain = LLMChain(llm=chat, prompt=prompt)
-
-# new LangChain syntax
-# this creates RunnableSequence internally to handle a chain
-# input goes to prompt first --> prompt formats input with template --> formatted prompt goes to chat mode --> chat model generates response
+# check notes
 chain = prompt | chat
 
 while True:
