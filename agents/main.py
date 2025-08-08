@@ -2,45 +2,138 @@ from langchain_openai import ChatOpenAI
 from langchain.prompts import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
-    MessagesPlaceholder,
+    MessagesPlaceholder
 )
-from langchain.agents import OpenAIFunctionsAgent, AgentExecutor
-from langchain.schema import SystemMessage  # in order to add further info for context
-from langchain.memory import ConversationBufferMemory
+from langchain.schema import SystemMessage
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain.agents.output_parsers.openai_tools import OpenAIToolsAgentOutputParser
+from langchain.agents.format_scratchpad.openai_tools import format_to_openai_tool_messages
+from langchain_core.agents import AgentFinish
 from dotenv import load_dotenv
 
-# calling our tool
 from tools.sql import run_query_tool, list_tables, describe_tables_tool
 from tools.report import write_report_tool
+from handlers.chat_model_start_handler import ChatModelStartHandler
 
 load_dotenv()
 
-chat = ChatOpenAI()
+handler = ChatModelStartHandler()
+chat = ChatOpenAI(
+    callbacks=[handler]
+)
+
 tables = list_tables()
-
-# input = input("<< ")
-
 prompt = ChatPromptTemplate(
     messages=[
-        SystemMessage(
-            content=(
-                "You are an AI that has access to a SQLite database.\n"
-                f"The database has tables of: {tables}\n"
-                "Do not make any assumptions about what tables exist "
-                " or what columns exist. Instead, use the 'describe_tables' function."
-            )
-        ),
+        SystemMessage(content=(
+            "You are an AI that has access to a SQLite database.\n"
+            f"The database has tables of: {tables}\n"
+            "Do not make any assumptions about what tables exist "
+            "or what columns exist. Instead, use the 'describe_tables' function"
+        )),
         MessagesPlaceholder(variable_name="chat_history"),
-        HumanMessagePromptTemplate.from_template("{input}"),    # takes in input variable
-        MessagesPlaceholder(variable_name="agent_scratchpad"),  # agent_scratchpad is simplified form of memory to remember conversations
+        HumanMessagePromptTemplate.from_template("{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad")
     ]
 )
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-tools = [run_query_tool, describe_tables_tool, write_report_tool]
 
-agent = OpenAIFunctionsAgent(llm=chat, prompt=prompt, tools=tools)
+tools = [
+    run_query_tool,
+    describe_tables_tool,
+    write_report_tool
+]
 
-agent_executor = AgentExecutor(agent=agent, verbose=True, tools=tools, memory=memory)
+# Bind tools to the model
+llm_with_tools = chat.bind_tools(tools)
 
-agent_executor("How many orders are there? Write the report to a file.")
-agent_executor("Repeat the exact same process for users")
+# Create the LCEL agent chain using pipe operator; replaced the AgentExecutor previously
+# this method: 
+    # 1. formats intermediate steps into the agent_scratchpad
+    # 2. passes through prompt template
+    # 3. send prompt to LLM with tools attached
+    # 4. parsed output to determine next action
+agent = (
+    RunnablePassthrough.assign(
+        agent_scratchpad=lambda x: format_to_openai_tool_messages(
+            x.get("intermediate_steps", [])
+        )
+    )
+    | prompt
+    | llm_with_tools
+    | OpenAIToolsAgentOutputParser()
+)
+
+# Tool executor function
+def execute_tools(output):
+    if isinstance(output, list):
+        output = output[0]
+    
+    if hasattr(output, 'tool'):
+        tool_name = output.tool
+        tool_input = output.tool_input
+        # Find and execute the tool
+        for tool in tools:
+            if tool.name == tool_name:
+                return tool.invoke(tool_input)
+    return output
+
+# Create tool executor as a runnable
+tool_executor = RunnableLambda(execute_tools)
+
+# Set up chat history
+chat_history = ChatMessageHistory()
+
+# Function to run the agent loop
+# custom agent loop implementation
+# keeps running until agent generates final answer; executes tools, collects outputs, and feeds observations back into agent for next step
+def run_agent(inputs):
+    intermediate_steps = []
+    current_input = inputs.copy()
+    
+    while True:
+        # Add intermediate steps to input
+        current_input["intermediate_steps"] = intermediate_steps
+        
+        # Run the agent
+        output = agent.invoke(current_input)
+        
+        # If it's a final answer, return it
+        if isinstance(output, AgentFinish):
+            return {"output": output.return_values["output"]}
+        
+        # Otherwise, execute the tool
+        if isinstance(output, list):
+            output = output[0]
+        
+        observation = tool_executor.invoke(output)
+        intermediate_steps.append((output, str(observation)))
+
+# Create the agent executor as a runnable
+agent_executor = RunnableLambda(run_agent)
+
+# Wrap with message history using LCEL
+# replaces chat_history memory from previous
+agent_with_history = RunnableWithMessageHistory(
+    agent_executor,
+    lambda session_id: chat_history,
+    input_messages_key="input",
+    history_messages_key="chat_history"
+)
+
+# Use the LCEL chain
+# execution method previously was using agent_executor
+print("Initial query:")
+initial_query_result = agent_with_history.invoke(
+    {"input": "How many orders are there? Write the result to an html report."},
+    config={"configurable": {"session_id": "default"}}
+)
+print(f"Response: {initial_query_result['output']}")
+
+print("\nFollowup query:")
+followup_query_result = agent_with_history.invoke(
+    {"input": "Repeat the exact same process for users."},
+    config={"configurable": {"session_id": "default"}}
+)
+print(f"Response: {followup_query_result['output']}")
